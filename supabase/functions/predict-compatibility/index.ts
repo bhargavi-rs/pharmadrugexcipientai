@@ -1,9 +1,31 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
+
+// Authentication helper
+async function authenticateRequest(req: Request): Promise<{ user: { id: string; email?: string } } | null> {
+  const authHeader = req.headers.get('authorization');
+  if (!authHeader) {
+    return null;
+  }
+
+  const supabaseClient = createClient(
+    Deno.env.get('SUPABASE_URL') ?? '',
+    Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+    { global: { headers: { Authorization: authHeader } } }
+  );
+
+  const { data: { user }, error } = await supabaseClient.auth.getUser();
+  if (error || !user) {
+    return null;
+  }
+
+  return { user: { id: user.id, email: user.email } };
+}
 
 // Allowed excipients whitelist
 const ALLOWED_EXCIPIENTS = [
@@ -37,6 +59,7 @@ const SAFE_ERROR_MESSAGES: Record<string, { message: string; status: number }> =
   'validation': { message: 'Invalid request format', status: 400 },
   'method': { message: 'Method not allowed', status: 405 },
   'parse': { message: 'Invalid request body', status: 400 },
+  'auth': { message: 'Authentication required', status: 401 },
   'default': { message: 'Unable to process prediction request', status: 500 }
 };
 
@@ -198,6 +221,14 @@ serve(async (req) => {
       throw { type: 'method', detail: 'Only POST method is allowed' };
     }
 
+    // Authenticate request - require valid JWT
+    const authResult = await authenticateRequest(req);
+    if (!authResult) {
+      throw { type: 'auth', detail: 'Valid authentication token required' };
+    }
+
+    console.log(`Authenticated request from user: ${authResult.user.id}`);
+
     let rawBody: unknown;
     try {
       rawBody = await req.json();
@@ -208,7 +239,7 @@ serve(async (req) => {
     // Validate and sanitize input
     const validatedInput = validateInput(rawBody);
     
-    console.log('Validated input, processing prediction...');
+    console.log(`Processing prediction for user ${authResult.user.id}...`);
     
     // Simulate some processing time (200-500ms)
     await new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 300));
