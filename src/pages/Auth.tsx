@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
-import { FlaskConical } from "lucide-react";
+import { FlaskConical, LogIn, UserPlus } from "lucide-react";
 
 export default function Auth() {
   const [isLogin, setIsLogin] = useState(true);
@@ -33,6 +33,9 @@ export default function Auth() {
         const { error } = await supabase.auth.signUp({
           email,
           password,
+          options: {
+            emailRedirectTo: `${window.location.origin}/`,
+          },
         });
         if (error) throw error;
         toast({ title: "Account created!", description: "You can now use PharmaComply AI." });
@@ -63,6 +66,28 @@ export default function Auth() {
           </CardDescription>
         </CardHeader>
         <CardContent>
+          {/* Login/Signup Toggle Buttons */}
+          <div className="flex gap-2 mb-6">
+            <Button
+              type="button"
+              variant={isLogin ? "default" : "outline"}
+              className={`flex-1 ${isLogin ? "bg-pharma-600 hover:bg-pharma-700" : "border-pharma-200 text-pharma-600 hover:bg-pharma-50"}`}
+              onClick={() => setIsLogin(true)}
+            >
+              <LogIn className="w-4 h-4 mr-2" />
+              Login
+            </Button>
+            <Button
+              type="button"
+              variant={!isLogin ? "default" : "outline"}
+              className={`flex-1 ${!isLogin ? "bg-pharma-600 hover:bg-pharma-700" : "border-pharma-200 text-pharma-600 hover:bg-pharma-50"}`}
+              onClick={() => setIsLogin(false)}
+            >
+              <UserPlus className="w-4 h-4 mr-2" />
+              Sign Up
+            </Button>
+          </div>
+
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
@@ -92,18 +117,19 @@ export default function Auth() {
               className="w-full bg-pharma-600 hover:bg-pharma-700"
               disabled={loading}
             >
-              {loading ? "Please wait..." : isLogin ? "Sign In" : "Create Account"}
+              {loading ? "Please wait..." : isLogin ? (
+                <>
+                  <LogIn className="w-4 h-4 mr-2" />
+                  Sign In
+                </>
+              ) : (
+                <>
+                  <UserPlus className="w-4 h-4 mr-2" />
+                  Create Account
+                </>
+              )}
             </Button>
           </form>
-          <div className="mt-4 text-center text-sm">
-            <button
-              type="button"
-              onClick={() => setIsLogin(!isLogin)}
-              className="text-pharma-600 hover:underline"
-            >
-              {isLogin ? "Need an account? Sign up" : "Already have an account? Sign in"}
-            </button>
-          </div>
         </CardContent>
       </Card>
     </div>
