@@ -5,10 +5,24 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+// Allowed excipients whitelist
+const ALLOWED_EXCIPIENTS = [
+  'Lactose Monohydrate',
+  'Magnesium Stearate',
+  'Microcrystalline Cellulose'
+] as const;
+
+// SMILES code validation pattern (valid chemical notation characters)
+const SMILES_PATTERN = /^[A-Za-z0-9@+\-\[\]()=#\/\\%.]+$/;
+
+// Input length limits
+const MAX_DRUG_NAME_LENGTH = 200;
+const MAX_SMILES_LENGTH = 500;
+
 interface PredictionRequest {
   drugName: string;
   smilesCode: string;
-  excipient: string;
+  excipient: typeof ALLOWED_EXCIPIENTS[number];
 }
 
 interface PredictionResponse {
@@ -18,13 +32,64 @@ interface PredictionResponse {
   analysis_summary: string[];
 }
 
+// Safe error messages mapping - prevents exposing implementation details
+const SAFE_ERROR_MESSAGES: Record<string, { message: string; status: number }> = {
+  'validation': { message: 'Invalid request format', status: 400 },
+  'method': { message: 'Method not allowed', status: 405 },
+  'parse': { message: 'Invalid request body', status: 400 },
+  'default': { message: 'Unable to process prediction request', status: 500 }
+};
+
+function getSafeError(errorType: string): { message: string; status: number } {
+  return SAFE_ERROR_MESSAGES[errorType] || SAFE_ERROR_MESSAGES.default;
+}
+
+// Validate and sanitize input
+function validateInput(body: unknown): PredictionRequest {
+  if (!body || typeof body !== 'object') {
+    throw { type: 'validation', detail: 'Request body must be an object' };
+  }
+
+  const data = body as Record<string, unknown>;
+
+  // Validate drugName
+  if (typeof data.drugName !== 'string' || data.drugName.trim().length === 0) {
+    throw { type: 'validation', detail: 'drugName must be a non-empty string' };
+  }
+  if (data.drugName.length > MAX_DRUG_NAME_LENGTH) {
+    throw { type: 'validation', detail: `drugName exceeds maximum length of ${MAX_DRUG_NAME_LENGTH}` };
+  }
+
+  // Validate smilesCode
+  if (typeof data.smilesCode !== 'string' || data.smilesCode.trim().length === 0) {
+    throw { type: 'validation', detail: 'smilesCode must be a non-empty string' };
+  }
+  if (data.smilesCode.length > MAX_SMILES_LENGTH) {
+    throw { type: 'validation', detail: `smilesCode exceeds maximum length of ${MAX_SMILES_LENGTH}` };
+  }
+  if (!SMILES_PATTERN.test(data.smilesCode)) {
+    throw { type: 'validation', detail: 'smilesCode contains invalid characters' };
+  }
+
+  // Validate excipient against whitelist
+  if (typeof data.excipient !== 'string') {
+    throw { type: 'validation', detail: 'excipient must be a string' };
+  }
+  if (!ALLOWED_EXCIPIENTS.includes(data.excipient as typeof ALLOWED_EXCIPIENTS[number])) {
+    throw { type: 'validation', detail: 'excipient must be one of the allowed values' };
+  }
+
+  return {
+    drugName: data.drugName.trim(),
+    smilesCode: data.smilesCode.trim(),
+    excipient: data.excipient as typeof ALLOWED_EXCIPIENTS[number]
+  };
+}
+
 // Mock prediction logic - structured for easy ML model integration
 function predictCompatibility(request: PredictionRequest): PredictionResponse {
   console.log(`Processing prediction request for drug: ${request.drugName}`);
-  console.log(`SMILES: ${request.smilesCode}`);
-  console.log(`Excipient: ${request.excipient}`);
 
-  // Simulate processing delay
   const hasReactiveGroups = detectReactiveGroups(request.smilesCode);
   const excipientRisk = getExcipientRiskProfile(request.excipient);
   const stabilityScore = calculateStabilityScore(request.smilesCode, request.excipient);
@@ -45,26 +110,24 @@ function predictCompatibility(request: PredictionRequest): PredictionResponse {
     stabilityScore
   );
 
-  console.log(`Prediction result: ${isCompatible ? 'Compatible' : 'Non-Compatible'}`);
-  console.log(`Probability: ${(probabilityScore * 100).toFixed(1)}%`);
+  console.log(`Prediction completed: ${isCompatible ? 'Compatible' : 'Non-Compatible'}`);
 
   return {
     compatibility_status: isCompatible ? 'Compatible' : 'Non-Compatible',
-    probability_score: Math.round(probabilityScore * 1000) / 10, // e.g., 92.4%
+    probability_score: Math.round(probabilityScore * 1000) / 10,
     confidence_level: confidenceLevel,
     analysis_summary: analysisSummary,
   };
 }
 
 function detectReactiveGroups(smiles: string): boolean {
-  // Simplified detection of reactive functional groups
   const reactivePatterns = ['CHO', 'NH2', 'COOH', 'C=O'];
   return reactivePatterns.some(pattern => smiles.toUpperCase().includes(pattern));
 }
 
 function getExcipientRiskProfile(excipient: string): 'low' | 'medium' | 'high' {
   const riskProfiles: Record<string, 'low' | 'medium' | 'high'> = {
-    'Lactose Monohydrate': 'medium', // Can cause Maillard reaction with amines
+    'Lactose Monohydrate': 'medium',
     'Magnesium Stearate': 'low',
     'Microcrystalline Cellulose': 'low',
   };
@@ -72,20 +135,16 @@ function getExcipientRiskProfile(excipient: string): 'low' | 'medium' | 'high' {
 }
 
 function calculateStabilityScore(smiles: string, excipient: string): number {
-  // Simulated stability calculation
   let score = 0.8;
   
-  // Reduce score for reactive groups
   if (detectReactiveGroups(smiles)) {
     score -= 0.15;
   }
   
-  // Adjust based on excipient
   if (excipient === 'Lactose Monohydrate' && smiles.includes('N')) {
-    score -= 0.2; // Potential Maillard reaction
+    score -= 0.2;
   }
   
-  // Add some controlled randomness for demo purposes
   score += (Math.random() - 0.5) * 0.1;
   
   return Math.max(0, Math.min(1, score));
@@ -136,22 +195,25 @@ serve(async (req) => {
 
   try {
     if (req.method !== 'POST') {
-      throw new Error('Method not allowed. Use POST.');
+      throw { type: 'method', detail: 'Only POST method is allowed' };
     }
 
-    const body: PredictionRequest = await req.json();
+    let rawBody: unknown;
+    try {
+      rawBody = await req.json();
+    } catch {
+      throw { type: 'parse', detail: 'Failed to parse JSON body' };
+    }
+
+    // Validate and sanitize input
+    const validatedInput = validateInput(rawBody);
     
-    // Validate input
-    if (!body.drugName || !body.smilesCode || !body.excipient) {
-      throw new Error('Missing required fields: drugName, smilesCode, or excipient');
-    }
-
     console.log('Validated input, processing prediction...');
     
     // Simulate some processing time (200-500ms)
     await new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 300));
     
-    const prediction = predictCompatibility(body);
+    const prediction = predictCompatibility(validatedInput);
 
     return new Response(
       JSON.stringify(prediction),
@@ -161,13 +223,19 @@ serve(async (req) => {
       }
     );
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'An unexpected error occurred';
-    console.error('Error processing request:', errorMessage);
+    // Log full error details server-side for debugging
+    console.error('Error processing request:', error);
+    
+    // Return safe, sanitized error message to client
+    const errorInfo = typeof error === 'object' && error !== null && 'type' in error
+      ? getSafeError((error as { type: string }).type)
+      : getSafeError('default');
+    
     return new Response(
-      JSON.stringify({ error: errorMessage }),
+      JSON.stringify({ error: errorInfo.message }),
       {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 400,
+        status: errorInfo.status,
       }
     );
   }
