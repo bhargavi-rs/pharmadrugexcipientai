@@ -27,24 +27,41 @@ async function authenticateRequest(req: Request): Promise<{ user: { id: string; 
   return { user: { id: user.id, email: user.email } };
 }
 
-// Allowed excipients whitelist
-const ALLOWED_EXCIPIENTS = [
-  'Lactose Monohydrate',
-  'Magnesium Stearate',
-  'Microcrystalline Cellulose'
-] as const;
+// Excipient category map (matching Python model)
+const EXCIPIENT_CATEGORY_MAP: Record<string, string> = {
+  "lactose": "reducing_sugar",
+  "mannitol": "sugar_alcohol",
+  "sorbitol": "sugar_alcohol",
+  "hpmc": "polymer",
+  "hydroxypropyl methylcellulose": "polymer",
+  "pvp": "polymer",
+  "pvp k30": "polymer",
+  "povidone": "polymer",
+  "polyvinylpyrrolidone": "polymer",
+  "dcp": "inorganic_salt",
+  "dicalcium phosphate": "inorganic_salt",
+  "sodium bicarbonate": "inorganic_salt",
+  "calcium carbonate": "inorganic_salt",
+  "mcc": "filler",
+  "microcrystalline cellulose": "filler",
+  "magnesium stearate": "lubricant",
+  "stearic acid": "lubricant",
+  "talc": "lubricant",
+  "sodium starch glycolate": "disintegrant",
+  "starch": "disintegrant",
+  "croscarmellose": "disintegrant",
+  "crospovidone": "disintegrant",
+};
 
-// SMILES code validation pattern (valid chemical notation characters)
+// SMILES code validation pattern
 const SMILES_PATTERN = /^[A-Za-z0-9@+\-\[\]()=#\/\\%.]+$/;
-
-// Input length limits
 const MAX_DRUG_NAME_LENGTH = 200;
 const MAX_SMILES_LENGTH = 500;
 
 interface PredictionRequest {
   drugName: string;
   smilesCode: string;
-  excipient: typeof ALLOWED_EXCIPIENTS[number];
+  excipient: string;
 }
 
 interface PredictionResponse {
@@ -54,7 +71,6 @@ interface PredictionResponse {
   analysis_summary: string[];
 }
 
-// Safe error messages mapping - prevents exposing implementation details
 const SAFE_ERROR_MESSAGES: Record<string, { message: string; status: number }> = {
   'validation': { message: 'Invalid request format', status: 400 },
   'method': { message: 'Method not allowed', status: 405 },
@@ -67,7 +83,14 @@ function getSafeError(errorType: string): { message: string; status: number } {
   return SAFE_ERROR_MESSAGES[errorType] || SAFE_ERROR_MESSAGES.default;
 }
 
-// Validate and sanitize input
+function normalizeText(text: string): string {
+  return text.toLowerCase()
+    .replace(/\(.*?\)/g, '')
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function validateInput(body: unknown): PredictionRequest {
   if (!body || typeof body !== 'object') {
     throw { type: 'validation', detail: 'Request body must be an object' };
@@ -75,7 +98,6 @@ function validateInput(body: unknown): PredictionRequest {
 
   const data = body as Record<string, unknown>;
 
-  // Validate drugName
   if (typeof data.drugName !== 'string' || data.drugName.trim().length === 0) {
     throw { type: 'validation', detail: 'drugName must be a non-empty string' };
   }
@@ -83,7 +105,6 @@ function validateInput(body: unknown): PredictionRequest {
     throw { type: 'validation', detail: `drugName exceeds maximum length of ${MAX_DRUG_NAME_LENGTH}` };
   }
 
-  // Validate smilesCode
   if (typeof data.smilesCode !== 'string' || data.smilesCode.trim().length === 0) {
     throw { type: 'validation', detail: 'smilesCode must be a non-empty string' };
   }
@@ -94,112 +115,211 @@ function validateInput(body: unknown): PredictionRequest {
     throw { type: 'validation', detail: 'smilesCode contains invalid characters' };
   }
 
-  // Validate excipient against whitelist
-  if (typeof data.excipient !== 'string') {
-    throw { type: 'validation', detail: 'excipient must be a string' };
-  }
-  if (!ALLOWED_EXCIPIENTS.includes(data.excipient as typeof ALLOWED_EXCIPIENTS[number])) {
-    throw { type: 'validation', detail: 'excipient must be one of the allowed values' };
+  if (typeof data.excipient !== 'string' || data.excipient.trim().length === 0) {
+    throw { type: 'validation', detail: 'excipient must be a non-empty string' };
   }
 
   return {
     drugName: data.drugName.trim(),
     smilesCode: data.smilesCode.trim(),
-    excipient: data.excipient as typeof ALLOWED_EXCIPIENTS[number]
+    excipient: data.excipient.trim()
   };
 }
 
-// Mock prediction logic - structured for easy ML model integration
-function predictCompatibility(request: PredictionRequest): PredictionResponse {
-  console.log(`Processing prediction request for drug: ${request.drugName}`);
+// Detect structural flags from SMILES (simplified JS version)
+function computeStructuralFlags(smiles: string): Record<string, boolean | number> {
+  const smilesLower = smiles.toLowerCase();
+  
+  return {
+    is_salt: smiles.includes('.'),
+    contains_cl: smilesLower.includes('[cl') || smilesLower.includes('cl]'),
+    contains_na: smilesLower.includes('[na') || smilesLower.includes('na]'),
+    contains_k: smilesLower.includes('[k') || smilesLower.includes('k]'),
+    contains_ca: smilesLower.includes('[ca') || smilesLower.includes('ca]'),
+    contains_br: smilesLower.includes('[br') || smilesLower.includes('br]'),
+    has_primary_amine: smilesLower.includes('n') && !smilesLower.includes('n('),
+    has_secondary_amine: (smiles.match(/N\(/g) || []).length === 1,
+    has_carboxylic_acid: smilesLower.includes('c(=o)o') || smilesLower.includes('c(=o)[o-]') || smiles.includes('COOH'),
+    has_phenol: smilesLower.includes('c(o)') || smilesLower.includes('c1ccc(o)'),
+    is_aromatic: smiles.includes('c1') || smiles.includes('C1=C'),
+    has_aldehyde: smiles.includes('CHO') || smiles.includes('C=O'),
+    has_ketone: (smiles.match(/C\(=O\)C/g) || []).length > 0,
+    estimated_mw: smiles.length * 8, // Rough estimation
+    high_flexibility: (smiles.match(/C/g) || []).length > 15,
+    high_mw: smiles.length > 60,
+  };
+}
 
-  const hasReactiveGroups = detectReactiveGroups(request.smilesCode);
-  const excipientRisk = getExcipientRiskProfile(request.excipient);
-  const stabilityScore = calculateStabilityScore(request.smilesCode, request.excipient);
+// Get excipient category and risk profile
+function getExcipientProfile(excipientNorm: string): { category: string; riskLevel: 'low' | 'medium' | 'high' } {
+  let category = 'unknown';
+  
+  for (const [key, cat] of Object.entries(EXCIPIENT_CATEGORY_MAP)) {
+    if (excipientNorm.includes(key)) {
+      category = cat;
+      break;
+    }
+  }
 
-  // Rule-based compatibility prediction (placeholder for ML model)
-  const isCompatible = stabilityScore > 0.6 && excipientRisk !== 'high';
-  const probabilityScore = isCompatible 
-    ? 0.75 + Math.random() * 0.2  // 75-95% for compatible
-    : 0.15 + Math.random() * 0.3; // 15-45% for incompatible
-
-  const confidenceLevel = probabilityScore > 0.85 ? 'High' : probabilityScore > 0.6 ? 'Medium' : 'Low';
-
-  const analysisSummary = generateAnalysisSummary(
-    request.drugName,
-    request.excipient,
-    hasReactiveGroups,
-    isCompatible,
-    stabilityScore
-  );
-
-  console.log(`Prediction completed: ${isCompatible ? 'Compatible' : 'Non-Compatible'}`);
+  const riskLevels: Record<string, 'low' | 'medium' | 'high'> = {
+    'reducing_sugar': 'high',
+    'sugar_alcohol': 'low',
+    'polymer': 'low',
+    'inorganic_salt': 'medium',
+    'filler': 'low',
+    'lubricant': 'low',
+    'disintegrant': 'low',
+    'unknown': 'medium',
+  };
 
   return {
-    compatibility_status: isCompatible ? 'Compatible' : 'Non-Compatible',
-    probability_score: Math.round(probabilityScore * 1000) / 10,
-    confidence_level: confidenceLevel,
-    analysis_summary: analysisSummary,
+    category,
+    riskLevel: riskLevels[category] || 'medium',
   };
 }
 
-function detectReactiveGroups(smiles: string): boolean {
-  const reactivePatterns = ['CHO', 'NH2', 'COOH', 'C=O'];
-  return reactivePatterns.some(pattern => smiles.toUpperCase().includes(pattern));
-}
-
-function getExcipientRiskProfile(excipient: string): 'low' | 'medium' | 'high' {
-  const riskProfiles: Record<string, 'low' | 'medium' | 'high'> = {
-    'Lactose Monohydrate': 'medium',
-    'Magnesium Stearate': 'low',
-    'Microcrystalline Cellulose': 'low',
-  };
-  return riskProfiles[excipient] || 'medium';
-}
-
-function calculateStabilityScore(smiles: string, excipient: string): number {
-  let score = 0.8;
+// Main prediction logic (enhanced rule-based, placeholder for ML)
+function predictCompatibility(request: PredictionRequest): PredictionResponse {
+  console.log(`Processing prediction for drug: ${request.drugName}, excipient: ${request.excipient}`);
   
-  if (detectReactiveGroups(smiles)) {
+  const excipientNorm = normalizeText(request.excipient);
+  const structuralFlags = computeStructuralFlags(request.smilesCode);
+  const excipientProfile = getExcipientProfile(excipientNorm);
+  
+  // Calculate compatibility score based on rules from Python model
+  let score = 0.75; // Base score
+  
+  // Maillard reaction risk: amines + reducing sugars
+  const hasAmine = structuralFlags.has_primary_amine || structuralFlags.has_secondary_amine;
+  if (hasAmine && excipientProfile.category === 'reducing_sugar') {
+    score -= 0.35; // High risk
+  }
+  
+  // Carboxylic acid + inorganic salts interaction
+  if (structuralFlags.has_carboxylic_acid && excipientProfile.category === 'inorganic_salt') {
     score -= 0.15;
   }
   
-  if (excipient === 'Lactose Monohydrate' && smiles.includes('N')) {
-    score -= 0.2;
+  // Aldehyde reactivity
+  if (structuralFlags.has_aldehyde) {
+    score -= 0.20;
   }
   
-  score += (Math.random() - 0.5) * 0.1;
+  // Salt forms may have stability issues
+  if (structuralFlags.is_salt) {
+    score -= 0.10;
+  }
   
-  return Math.max(0, Math.min(1, score));
+  // High molecular weight compounds may have dissolution issues
+  if (structuralFlags.high_mw) {
+    score -= 0.05;
+  }
+  
+  // Sugar alcohols are generally safe
+  if (excipientProfile.category === 'sugar_alcohol') {
+    score += 0.10;
+  }
+  
+  // Polymers provide good stability
+  if (excipientProfile.category === 'polymer') {
+    score += 0.05;
+  }
+  
+  // Add small random variation for realism
+  score += (Math.random() - 0.5) * 0.08;
+  score = Math.max(0.1, Math.min(0.95, score));
+  
+  // Decision logic matching Python model
+  let compatibility: 'Compatible' | 'Non-Compatible';
+  let confidenceLevel: 'High' | 'Medium' | 'Low';
+  
+  if (score < 0.42) {
+    compatibility = 'Non-Compatible';
+    confidenceLevel = 'High';
+  } else if (score < 0.60) {
+    compatibility = 'Compatible';
+    confidenceLevel = 'Low';
+  } else if (score < 0.80) {
+    compatibility = 'Compatible';
+    confidenceLevel = 'Medium';
+  } else {
+    compatibility = 'Compatible';
+    confidenceLevel = 'High';
+  }
+  
+  const probabilityScore = Math.round(score * 1000) / 10;
+  
+  // Generate analysis summary
+  const summary = generateAnalysisSummary(
+    request.drugName,
+    request.excipient,
+    excipientProfile,
+    structuralFlags,
+    compatibility === 'Compatible',
+    score
+  );
+  
+  console.log(`Prediction completed: ${compatibility}, score: ${probabilityScore}%`);
+  
+  return {
+    compatibility_status: compatibility,
+    probability_score: probabilityScore,
+    confidence_level: confidenceLevel,
+    analysis_summary: summary,
+  };
 }
 
 function generateAnalysisSummary(
   drugName: string,
   excipient: string,
-  hasReactiveGroups: boolean,
+  excipientProfile: { category: string; riskLevel: string },
+  flags: Record<string, boolean | number>,
   isCompatible: boolean,
-  stabilityScore: number
+  score: number
 ): string[] {
   const summary: string[] = [];
   
+  const hasAmine = flags.has_primary_amine || flags.has_secondary_amine;
+  
   if (isCompatible) {
-    if (!hasReactiveGroups) {
-      summary.push("No reactive functional groups detected in the API structure.");
-    } else {
-      summary.push("Reactive functional groups detected but pose minimal risk with selected excipient.");
+    summary.push(`✓ ${drugName} shows favorable compatibility with ${excipient}.`);
+    
+    if (!hasAmine && excipientProfile.category === 'reducing_sugar') {
+      summary.push("No reactive amine groups detected - low Maillard reaction risk.");
     }
-    summary.push(`${excipient} shows chemical stability with ${drugName}.`);
-    summary.push(`Risk level: LOW (Maillard reaction unlikely).`);
-    summary.push(`Stability score: ${(stabilityScore * 100).toFixed(0)}% - suitable for formulation development.`);
+    
+    if (excipientProfile.category === 'sugar_alcohol') {
+      summary.push("Sugar alcohol excipients provide excellent chemical stability.");
+    }
+    
+    if (excipientProfile.category === 'polymer') {
+      summary.push("Polymer matrix offers good physical and chemical protection.");
+    }
+    
+    if (excipientProfile.category === 'filler') {
+      summary.push("Inert filler material with minimal reactivity expected.");
+    }
+    
+    summary.push(`Stability score: ${(score * 100).toFixed(0)}% - suitable for formulation development.`);
+    summary.push(`Risk level: ${excipientProfile.riskLevel.toUpperCase()}`);
   } else {
-    if (hasReactiveGroups) {
-      summary.push("⚠️ Reactive functional groups detected that may interact with excipient.");
+    summary.push(`⚠️ Potential incompatibility detected between ${drugName} and ${excipient}.`);
+    
+    if (hasAmine && excipientProfile.category === 'reducing_sugar') {
+      summary.push("⚠️ HIGH RISK: Amine functional groups detected with reducing sugar excipient.");
+      summary.push("Maillard reaction may cause drug degradation and discoloration.");
     }
-    if (excipient === 'Lactose Monohydrate') {
-      summary.push(`Potential Maillard reaction risk with ${drugName} and Lactose Monohydrate.`);
+    
+    if (flags.has_aldehyde) {
+      summary.push("Aldehyde group detected - prone to oxidation and condensation reactions.");
     }
-    summary.push(`Risk level: HIGH - further stability studies recommended.`);
-    summary.push(`Consider alternative excipients such as Microcrystalline Cellulose.`);
+    
+    if (flags.has_carboxylic_acid && excipientProfile.category === 'inorganic_salt') {
+      summary.push("Carboxylic acid may interact with inorganic salt excipient.");
+    }
+    
+    summary.push(`Risk level: HIGH - further stability studies strongly recommended.`);
+    summary.push("Consider alternative excipients such as Microcrystalline Cellulose or Mannitol.");
   }
   
   summary.push("");
@@ -211,7 +331,6 @@ function generateAnalysisSummary(
 serve(async (req) => {
   console.log(`Received ${req.method} request`);
 
-  // Handle CORS preflight requests
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -221,7 +340,6 @@ serve(async (req) => {
       throw { type: 'method', detail: 'Only POST method is allowed' };
     }
 
-    // Authenticate request - require valid JWT
     const authResult = await authenticateRequest(req);
     if (!authResult) {
       throw { type: 'auth', detail: 'Valid authentication token required' };
@@ -236,12 +354,11 @@ serve(async (req) => {
       throw { type: 'parse', detail: 'Failed to parse JSON body' };
     }
 
-    // Validate and sanitize input
     const validatedInput = validateInput(rawBody);
     
     console.log(`Processing prediction for user ${authResult.user.id}...`);
     
-    // Simulate some processing time (200-500ms)
+    // Simulate processing time
     await new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 300));
     
     const prediction = predictCompatibility(validatedInput);
@@ -254,10 +371,8 @@ serve(async (req) => {
       }
     );
   } catch (error: unknown) {
-    // Log full error details server-side for debugging
     console.error('Error processing request:', error);
     
-    // Return safe, sanitized error message to client
     const errorInfo = typeof error === 'object' && error !== null && 'type' in error
       ? getSafeError((error as { type: string }).type)
       : getSafeError('default');
